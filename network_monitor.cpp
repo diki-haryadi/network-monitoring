@@ -11,6 +11,8 @@
 #include <iomanip>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <csignal>
 
 struct DomainStats {
     std::string domain;
@@ -20,6 +22,14 @@ struct DomainStats {
     uint64_t packets_out = 0;
     std::string last_seen;
 };
+
+std::atomic<pcap_t*> g_handle{nullptr};
+
+void signal_handler(int sig) {
+    (void)sig;
+    pcap_t* h = g_handle.load();
+    if (h) pcap_breakloop(h);
+}
 
 std::map<std::string, DomainStats> domain_stats;
 
@@ -179,21 +189,42 @@ int main(int argc, char* argv[]) {
             std::cout << std::endl;
         }
 
-        std::cout << "\nEnter interface number (default 1): ";
+        std::cout << "\nEnter interface number or name (default 1): ";
         std::string input;
         std::getline(std::cin, input);
 
-        int choice = input.empty() ? 1 : std::stoi(input);
-        i = 0;
-        for (d = alldevs; d != nullptr && i < choice - 1; d = d->next) {
-            i++;
-        }
-
-        if (d != nullptr) {
-            device = d->name;
+        if (input.empty()) {
+            // Default to first interface
+            device = alldevs->name;
         } else {
-            std::cerr << "Invalid choice" << std::endl;
-            return 1;
+            // Try to parse as number first
+            try {
+                int choice = std::stoi(input);
+                i = 0;
+                for (d = alldevs; d != nullptr && i < choice - 1; d = d->next) {
+                    i++;
+                }
+                if (d != nullptr) {
+                    device = d->name;
+                } else {
+                    std::cerr << "Invalid interface number" << std::endl;
+                    return 1;
+                }
+            } catch (const std::invalid_argument&) {
+                // Not a number, treat as interface name
+                bool found = false;
+                for (d = alldevs; d != nullptr; d = d->next) {
+                    if (input == d->name) {
+                        device = d->name;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "Interface not found: " << input << std::endl;
+                    return 1;
+                }
+            }
         }
     }
 
@@ -207,6 +238,9 @@ int main(int argc, char* argv[]) {
         pcap_freealldevs(alldevs);
         return 1;
     }
+
+    signal(SIGINT, signal_handler);
+    g_handle.store(handle);
 
     // Filter untuk DNS dan HTTP/HTTPS
     std::string filter_str = "udp port 53 or tcp port 80 or tcp port 443 or tcp port 8080";
